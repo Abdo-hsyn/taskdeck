@@ -1,0 +1,7 @@
+# Decisions & Trade-offs
+
+1. **JWT in HttpOnly cookie (not localStorage).** Why: XSS cannot read the token, `SameSite=Lax` blocks cross-site CSRF on state-changing routes. Alternative rejected: Bearer token in localStorage — simpler CORS, but token theft via XSS is a real risk for a portfolio project meant to be judged on security basics. Note: state-changing routes rely on SameSite + strict CORS origin check; no CSRF token (documented limitation).
+2. **Two folders in one repo (`client/`, `server/`) without a workspace tool.** Why: fastest path to a reviewable monorepo; each package has its own `package.json` and CI step. Alternative rejected: Turborepo/pnpm workspaces — nicer, but adds tooling a reviewer must learn before running it; both install with `npm install`.
+3. **Prisma + PostgreSQL (Neon) instead of SQLite/Mongo.** Why: the brief demands "Database"; Postgres + Prisma migrations + seed script demonstrates real data modeling and is the market-standard stack. SQLite rejected: type/enum support and production parity. MongoDB rejected: relational data (projects ↔ members ↔ tasks ↔ comments) fits SQL better.
+4. **Role-based membership (owner/member) instead of single-user projects.** Why: it makes authorization testable and visible — the classic "server-side authz" signal reviewers look for — at almost no extra scope.
+5. **Express 5 + TypeScript + Zod.** Why: validation at the boundary with one error envelope keeps handlers small; Express 5 is current and handles async errors natively (no try/catch soup).
