@@ -6,8 +6,8 @@ A full-stack **task & project management app** — kanban boards, priorities, du
 
 ## Live demo
 
-- **Frontend:** [Vercel URL]
-- **API:** [Render URL] · health check: `/api/health`
+- **Frontend:** https://taskdeck-client.vercel.app
+- **API:** https://taskdeck-api.vercel.app · health check: `/api/health`
 - **Demo login:** `demo@taskdeck.app` / `demo1234!`
 
 ## Tech stack
@@ -23,7 +23,7 @@ A full-stack **task & project management app** — kanban boards, priorities, du
 
 ## Features
 
-- **Auth** — register / login / logout / session restore; passwords hashed with bcrypt (12 rounds); JWT stored in an `HttpOnly; SameSite=Lax` cookie (not readable from JS).
+- **Auth** — register / login / logout / session restore; passwords hashed with bcrypt (12 rounds); JWT stored in an `HttpOnly` cookie (not readable from JS) — `SameSite=None; Secure` in production because the frontend and API live on different domains, `SameSite=Lax` in local dev.
 - **Projects** — create, rename, delete; membership with `owner` / `member` roles; authorization enforced **server-side** on every route.
 - **Kanban board** — `todo → doing → done` columns with status lamps, priority badges, optimistic task moves.
 - **Tasks** — title, description, priority (`low/medium/high`), due date, ordering.
@@ -106,6 +106,8 @@ The Vite dev server proxies `/api` to `http://localhost:4000` (see `vite.config.
 | `CLIENT_ORIGINS` | comma-separated allowed origins, e.g. `http://localhost:5173` |
 | `PORT` | API port (default `4000`) |
 | `NODE_ENV` | `development` / `production` / `test` |
+
+The client reads `VITE_API_URL` (API origin, no trailing path) in production builds — locally it is unset and Vite proxies `/api` instead.
 
 ## Scripts
 

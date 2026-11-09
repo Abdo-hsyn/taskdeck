@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit';
+import { rateLimit } from 'express-rate-limit';
 
 const skipInTest = () => process.env.NODE_ENV === 'test';
 

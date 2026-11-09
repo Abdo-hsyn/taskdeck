@@ -1,6 +1,6 @@
-import express from 'express';
+import express, { type RequestHandler } from 'express';
 import cors from 'cors';
-import helmet from 'helmet';
+import * as helmetNs from 'helmet';
 import cookieParser from 'cookie-parser';
 import { env } from './config/env.js';
 import { generalLimiter } from './middleware/rateLimit.js';
@@ -8,6 +8,17 @@ import { errorHandler, notFoundHandler } from './middleware/error.js';
 import authRoutes from './routes/auth.js';
 import projectRoutes from './routes/projects.js';
 import taskRoutes from './routes/tasks.js';
+
+/**
+ * helmet ships an ESM wrapper plus CJS types; different TypeScript module
+ * resolution modes disagree about the shape of its default export, and
+ * Vercel's build-time checker rejects calling it (TS2349). The runtime
+ * factory is the same in every format (`index.mjs`/`index.cjs` both export
+ * the middleware function as `default`), so we type it ourselves instead of
+ * relying on the package's declarations.
+ */
+type HelmetFactory = () => RequestHandler;
+const helmet = (helmetNs as unknown as Record<string, unknown>)['default'] as HelmetFactory;
 
 export function createApp() {
   const app = express();

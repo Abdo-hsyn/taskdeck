@@ -22,18 +22,30 @@ export function signToken(user: AuthUser): string {
   });
 }
 
-export function setAuthCookie(res: Response, token: string): void {
-  res.cookie(COOKIE_NAME, token, {
+/**
+ * Production serves the API on a different registrable domain than the client
+ * (taskdeck-client.vercel.app → taskdeck-api.vercel.app), so the session
+ * cookie must be `SameSite=None; Secure` to be sent on cross-site XHR.
+ * Cross-origin abuse is blocked by the CORS origin allowlist (JSON content
+ * type forces a preflight).
+ * Dev is same-origin (Vite proxy) → Lax is enough and works over http.
+ */
+function cookieOptions() {
+  return {
     httpOnly: true,
-    sameSite: 'lax',
+    sameSite: (env.isProduction ? 'none' : 'lax') as 'none' | 'lax',
     secure: env.isProduction,
     maxAge: 7 * 24 * 60 * 60 * 1000,
     path: '/',
-  });
+  };
+}
+
+export function setAuthCookie(res: Response, token: string): void {
+  res.cookie(COOKIE_NAME, token, cookieOptions());
 }
 
 export function clearAuthCookie(res: Response): void {
-  res.clearCookie(COOKIE_NAME, { path: '/' });
+  res.clearCookie(COOKIE_NAME, { path: '/', sameSite: cookieOptions().sameSite, secure: cookieOptions().secure });
 }
 
 /** Verifies the JWT cookie and attaches `req.user`. Throws 401 when invalid. */

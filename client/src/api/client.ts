@@ -11,7 +11,13 @@ export class ApiError extends Error {
   }
 }
 
-const BASE = import.meta.env.VITE_API_URL ?? '/api';
+/**
+ * API origin from env (e.g. https://taskdeck-api.vercel.app), no trailing
+ * slash and no path — `/api` is appended here so routes match the server
+ * (`app.use('/api', …)`). Dev falls back to `/api` via the Vite proxy.
+ */
+const API_ORIGIN = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '');
+const BASE = `${API_ORIGIN}/api`;
 
 /**
  * Single fetch wrapper: JSON in/out, cookies included, typed error envelope.
