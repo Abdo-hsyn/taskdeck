@@ -30,9 +30,12 @@ function RequireAuth({ children }: { children: ReactNode }) {
 
 export default function App() {
   const { status } = useAuth();
+  const location = useLocation();
 
   return (
-    <Routes>
+    // key: replay the calm route-entry animation on every navigation
+    <div className="route-stage" key={location.pathname}>
+      <Routes location={location}>
       <Route
         path="/login"
         element={status === 'authed' ? <Navigate to="/" replace /> : <LoginPage />}
@@ -58,6 +61,7 @@ export default function App() {
         }
       />
       <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+      </Routes>
+    </div>
   );
 }

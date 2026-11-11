@@ -25,8 +25,9 @@ A full-stack **task & project management app** — kanban boards, priorities, du
 
 - **Auth** — register / login / logout / session restore; passwords hashed with bcrypt (12 rounds); JWT stored in an `HttpOnly` cookie (not readable from JS) — `SameSite=None; Secure` in production because the frontend and API live on different domains, `SameSite=Lax` in local dev.
 - **Projects** — create, rename, delete; membership with `owner` / `member` roles; authorization enforced **server-side** on every route.
-- **Kanban board** — `todo → doing → done` columns with status lamps, priority badges, optimistic task moves.
-- **Tasks** — title, description, priority (`low/medium/high`), due date, ordering.
+- **Kanban board** — `todo → doing → done` columns with status lamps, priority badges; **real drag & drop** (dnd-kit: mouse/touch/keyboard, drag overlay, drop-target highlight) with optimistic moves — one `PATCH` per drop, writes serialized, rollback + toast on failure.
+- **Board toolbar** — live stats strip (total / per-column / completion %), search across title+description, priority and status filter chips with a "no matches" empty state.
+- **Tasks** — title, description, priority (`low/medium/high`), due date, ordering; detail drawer with MOVE TO buttons and delete; toasts for create/delete/move failures.
 - **Comments** — per task, with author and timestamps.
 - **Team members** — owners invite existing users by email and manage roles.
 - **Cross-cutting** — uniform error envelope `{error:{message,code}}`, rate limiting (100 req/15min general, 20/15min on auth), Helmet security headers, CORS restricted to configured origins, `/api/health`.

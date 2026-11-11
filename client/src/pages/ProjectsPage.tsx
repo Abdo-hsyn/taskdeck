@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type CSSProperties, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { projects as api, ApiError, type ProjectListItem } from '../api/client';
 import { useAuth } from '../context/auth-context';
@@ -87,7 +87,7 @@ export default function ProjectsPage() {
         </header>
 
         {showCreate && (
-          <form className="panel" onSubmit={onCreate} style={{ marginBottom: 24 }}>
+          <form className="panel panel-in" onSubmit={onCreate} style={{ marginBottom: 24 }}>
             <p className="eyebrow" style={{ marginBottom: 12 }}>NEW PROJECT</p>
             <label className="field">
               <span>Name</span>
@@ -107,8 +107,10 @@ export default function ProjectsPage() {
         {error && <p className="error-text">{error}</p>}
 
         {!list && !error && (
-          <div className="state">
-            <div className="spinner" />
+          <div className="project-grid" aria-hidden="true">
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <div key={i} className="skeleton skeleton-project" />
+            ))}
           </div>
         )}
 
@@ -121,14 +123,22 @@ export default function ProjectsPage() {
 
         {list && list.length > 0 && (
           <div className="project-grid">
-            {list.map((p) => (
-              <Link key={p.id} to={`/projects/${p.id}`} className="project-card">
+            {list.map((p, i) => (
+              <Link
+                key={p.id}
+                to={`/projects/${p.id}`}
+                className="project-card"
+                style={{ '--i': i } as CSSProperties}
+              >
                 <p className="eyebrow">{p.role === 'owner' ? 'OWNER' : 'MEMBER'}</p>
                 <h3>{p.name}</h3>
                 {p.description && <p className="muted" style={{ fontSize: 14 }}>{p.description}</p>}
                 <div className="project-card-foot mono muted">
                   <span>{p.taskCount} tasks</span>
-                  <span>{new Date(p.createdAt).toLocaleDateString()}</span>
+                  <span className="foot-right">
+                    {new Date(p.createdAt).toLocaleDateString()}
+                    <span className="card-arrow" aria-hidden="true">→</span>
+                  </span>
                 </div>
               </Link>
             ))}

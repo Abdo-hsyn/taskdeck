@@ -37,6 +37,13 @@ Errors use one envelope: `{ "error": { "message": string, "code": string } }`.
 
 `task` = `{id,projectId,title,description,status,priority,dueDate,position,createdById,createdAt,updatedAt}`.
 
+**`position` = move semantics (not absolute):** when `position` is sent (with or without `status`), it is the
+index the task should occupy in the **target column after the move**. The server reads both columns in one
+transaction, removes the task, re-inserts it at that index and renumbers both columns densely (0..n-1), so
+ordering stays correct even when columns have gaps from deletes. The board sends exactly one request per
+drop. Positions are ordered by `position` then `createdAt`. The transaction uses a 30s timeout / 10s maxWait
+because TiDB Serverless can take longer than Prisma's 5s default to wake up (P2028).
+
 ## Comments
 | Method | Path | Body | Success | Errors |
 |---|---|---|---|---|

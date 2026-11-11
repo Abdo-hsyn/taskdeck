@@ -1,7 +1,20 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  comments as commentsApi,
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  MouseSensor,
+  TouchSensor,
+  closestCorners,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragMoveEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core';
+import { sortableKeyboardCoordinates } from '@dnd-kit/sortable';
+import {
   projects as projectsApi,
   tasks as tasksApi,
   ApiError,
@@ -9,17 +22,40 @@ import {
   type Project,
   type Status,
   type Task,
-  type TaskDetail,
 } from '../api/client';
 import { useAuth } from '../context/auth-context';
+import { useToast } from '../components/Toast';
+import { COLUMNS, STATUSES } from '../components/board/meta';
+import { BoardColumn } from '../components/board/BoardColumn';
+import { BoardToolbar, StatsStrip } from '../components/board/BoardToolbar';
+import { NewTaskForm } from '../components/board/NewTaskForm';
+import { TaskCardFace } from '../components/board/TaskCard';
+import { TaskDrawer } from '../components/board/TaskDrawer';
 
-const COLUMNS: Array<{ status: Status; label: string }> = [
-  { status: 'todo', label: 'Todo' },
-  { status: 'doing', label: 'Doing' },
-  { status: 'done', label: 'Done' },
-];
+/** Rebuild the board with one task moved to `status` at index `insertAt`. Pure. */
+function applyMove(base: Task[], movedId: string, status: Status, insertAt: number): Task[] {
+  const cols: Record<Status, Task[]> = { todo: [], doing: [], done: [] };
+  for (const t of base) cols[t.status].push(t);
 
-const PRIORITY_LABEL: Record<Priority, string> = { low: 'LOW', medium: 'MED', high: 'HIGH' };
+  let moved: Task | null = null;
+  for (const s of STATUSES) {
+    const index = cols[s].findIndex((t) => t.id === movedId);
+    if (index !== -1) {
+      moved = cols[s][index];
+      cols[s] = cols[s].filter((_, i) => i !== index);
+      break;
+    }
+  }
+  if (!moved) return base;
+
+  const target = cols[status];
+  const at = Math.max(0, Math.min(insertAt, target.length));
+  cols[status] = [...target.slice(0, at), { ...moved, status }, ...target.slice(at)];
+
+  const out: Task[] = [];
+  for (const s of STATUSES) cols[s].forEach((t, i) => out.push({ ...t, status: s, position: i }));
+  return out;
+}
 
 export default function BoardPage() {
   const { id } = useParams<{ id: string }>();
@@ -28,19 +64,20 @@ export default function BoardPage() {
 
   const [project, setProject] = useState<Project | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [flash, setFlash] = useState<Status | null>(null); // lamp flash on drop
+  const [flash, setFlash] = useState<Status | null>(null); // lamp flash on drop into Done
 
   const [showNewTask, setShowNewTask] = useState(false);
-  const [title, setTitle] = useState('');
-  const [priority, setPriority] = useState<Priority>('medium');
-  const [newError, setNewError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<TaskDetail | null>(null);
-  const [detailError, setDetailError] = useState<string | null>(null);
-  const [commentBody, setCommentBody] = useState('');
-  const [commentBusy, setCommentBusy] = useState(false);
+  const [activeTask, setActiveTask] = useState<Task | null>(null); // drag overlay
+  const [overColumn, setOverColumn] = useState<Status | null>(null); // drop-target highlight
+
+  const [query, setQuery] = useState('');
+  const [priorityFilter, setPriorityFilter] = useState<Priority | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<Status | 'all'>('all');
+
+  const { push: toast, stack: toastStack } = useToast();
+  const writeQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const suppressClickAt = useRef(0);
 
   const load = useCallback(() => {
     if (!id) return;
@@ -58,115 +95,137 @@ export default function BoardPage() {
 
   useEffect(load, [load]);
 
+  /** Serialize writes so rapid drops can't arrive out of order. */
+  const enqueue = useCallback(<T,>(job: () => Promise<T>): Promise<T> => {
+    const run = writeQueue.current.then(job, job);
+    writeQueue.current = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }, []);
+
+  // ---------- derived ----------
+
+  const tasks = project?.tasks ?? [];
+  const q = query.trim().toLowerCase();
+  const visibleTasks = tasks.filter((t) => {
+    if (q && !t.title.toLowerCase().includes(q) && !(t.description ?? '').toLowerCase().includes(q)) return false;
+    if (priorityFilter !== 'all' && t.priority !== priorityFilter) return false;
+    return true;
+  });
+  const filtering = q !== '' || priorityFilter !== 'all' || statusFilter !== 'all';
+  const visibleColumns = statusFilter === 'all' ? COLUMNS : COLUMNS.filter((c) => c.status === statusFilter);
+  const stats = { total: tasks.length, todo: 0, doing: 0, done: 0 };
+  for (const t of tasks) stats[t.status] += 1;
+
+  // ---------- actions ----------
+
+  const moveTask = useCallback(
+    (task: Task, status: Status, position?: number): Promise<void> => {
+      if (!project) return Promise.resolve();
+      const withoutMoved = project.tasks.filter((t) => t.status === status && t.id !== task.id);
+      const insertAt = Math.max(0, Math.min(position ?? withoutMoved.length, withoutMoved.length));
+      if (task.status === status && insertAt === task.position) return Promise.resolve();
+
+      // Optimistic: apply locally first, reconcile with the server response
+      setProject((cur) => (cur ? { ...cur, tasks: applyMove(cur.tasks, task.id, status, insertAt) } : cur));
+      if (status === 'done') {
+        setFlash('done');
+        window.setTimeout(() => setFlash(null), 700);
+      }
+
+      return enqueue(() => tasksApi.update(task.id, { status, position: insertAt }))
+        .then(({ task: updated }) => {
+          setProject((cur) => (cur ? { ...cur, tasks: cur.tasks.map((t) => (t.id === updated.id ? updated : t)) } : cur));
+        })
+        .catch((err) => {
+          load(); // authoritative rollback
+          throw err;
+        });
+    },
+    [project, enqueue, load],
+  );
+
+  const deleteTask = useCallback(
+    async (taskId: string) => {
+      await tasksApi.remove(taskId);
+      setOpenTaskId(null);
+      load();
+      toast('Task deleted');
+    },
+    [load, toast],
+  );
+
+  function resetFilters() {
+    setQuery('');
+    setPriorityFilter('all');
+    setStatusFilter('all');
+  }
+
   function openTask(taskId: string) {
-    setDetail(null);
-    setDetailError(null);
+    if (Date.now() - suppressClickAt.current < 300) return; // ignore click after a drag
     setOpenTaskId(taskId);
   }
 
-  function closeTask() {
-    setOpenTaskId(null);
-    setDetail(null);
-    setDetailError(null);
-  }
-
-  // Load task detail whenever a card is opened
-  useEffect(() => {
-    if (!openTaskId) return;
-    let cancelled = false;
-    tasksApi
-      .get(openTaskId)
-      .then(({ task }) => {
-        if (!cancelled) {
-          setDetail(task);
-          setDetailError(null);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) setDetailError(err instanceof ApiError ? err.message : 'Failed to load the task.');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [openTaskId]);
-
-  async function onCreateTask(event: FormEvent) {
-    event.preventDefault();
-    if (!id) return;
-    setNewError(null);
-    setSubmitting(true);
-    try {
-      await tasksApi.create(id, { title, priority });
-      setTitle('');
-      setPriority('medium');
-      setShowNewTask(false);
-      load();
-    } catch (err) {
-      setNewError(err instanceof ApiError ? err.message : 'Could not create the task.');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function moveTask(task: Task, status: Status) {
-    if (task.status === status) return;
-    // Optimistic: update local state first, roll back on failure
-    setProject((prev) =>
-      prev ? { ...prev, tasks: prev.tasks.map((t) => (t.id === task.id ? { ...t, status } : t)) } : prev,
-    );
-    try {
-      await tasksApi.update(task.id, { status });
-      if (status === 'done') {
-        setFlash('done');
-        window.setTimeout(() => setFlash(null), 600);
-      }
-      load();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not move the task.');
-      load();
-    }
-  }
-
-  async function deleteTask(taskId: string) {
-    try {
-      await tasksApi.remove(taskId);
-      closeTask();
-      load();
-    } catch (err) {
-      setDetailError(err instanceof ApiError ? err.message : 'Could not delete the task.');
-    }
-  }
-
-  async function addComment(event: FormEvent) {
-    event.preventDefault();
-    if (!openTaskId || !commentBody.trim()) return;
-    setCommentBusy(true);
-    try {
-      await commentsApi.create(openTaskId, commentBody.trim());
-      setCommentBody('');
-      const { task } = await tasksApi.get(openTaskId);
-      setDetail(task);
-    } catch (err) {
-      setDetailError(err instanceof ApiError ? err.message : 'Could not add the comment.');
-    } finally {
-      setCommentBusy(false);
-    }
-  }
-
-  async function deleteComment(commentId: string) {
-    if (!openTaskId) return;
-    try {
-      await commentsApi.remove(commentId);
-      const { task } = await tasksApi.get(openTaskId);
-      setDetail(task);
-    } catch (err) {
-      setDetailError(err instanceof ApiError ? err.message : 'Could not delete the comment.');
-    }
-  }
+  const closeTask = useCallback(() => setOpenTaskId(null), []);
 
   async function onLogout() {
     await logout();
     navigate('/login', { replace: true });
+  }
+
+  // ---------- drag & drop ----------
+
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  function onDragStart(event: DragStartEvent) {
+    const task = event.active.data.current?.task as Task | undefined;
+    setActiveTask(task ?? null);
+  }
+
+  function onDragMove(event: DragMoveEvent) {
+    const over = event.over;
+    if (!over) {
+      setOverColumn(null);
+      return;
+    }
+    const status =
+      (over.data.current?.status as Status | undefined) ?? (over.data.current?.task as Task | undefined)?.status ?? null;
+    setOverColumn(status);
+  }
+
+  function onDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    setActiveTask(null);
+    setOverColumn(null);
+    suppressClickAt.current = Date.now();
+    if (!over || !project || active.id === over.id) return;
+
+    const moved = active.data.current?.task as Task | undefined;
+    if (!moved) return;
+    const overTask = over.data.current?.task as Task | undefined;
+    const status = (over.data.current?.status as Status | undefined) ?? overTask?.status;
+    if (!status) return;
+
+    // Index of the task we are dropping onto, in the target column as displayed
+    const column = project.tasks.filter((t) => t.status === status);
+    const insertAt = overTask ? column.findIndex((t) => t.id === overTask.id) : column.length;
+    if (insertAt === -1) return;
+
+    moveTask(moved, status, insertAt).catch(() => {
+      toast('Could not move the task — board re-synced.', 'err');
+    });
+  }
+
+  function onDragCancel() {
+    setActiveTask(null);
+    setOverColumn(null);
+    suppressClickAt.current = Date.now();
   }
 
   const isOwner = project?.role === 'owner';
@@ -210,83 +269,80 @@ export default function BoardPage() {
 
         {error && <p className="error-text">{error}</p>}
 
-        {showNewTask && (
-          <form className="panel" onSubmit={onCreateTask} style={{ marginBottom: 20 }}>
-            <label className="field">
-              <span>Task title</span>
-              <input className="input" required maxLength={200} value={title} onChange={(e) => setTitle(e.target.value)} />
-            </label>
-            <label className="field">
-              <span>Priority</span>
-              <select className="select" value={priority} onChange={(e) => setPriority(e.target.value as Priority)}>
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-              </select>
-            </label>
-            {newError && <p className="error-text">{newError}</p>}
-            <button className="btn btn-primary" type="submit" disabled={submitting}>
-              {submitting ? 'Adding…' : 'Add task'}
-            </button>
-          </form>
+        {project && (
+          <>
+            <StatsStrip total={stats.total} todo={stats.todo} doing={stats.doing} done={stats.done} />
+            <BoardToolbar
+              query={query}
+              onQuery={setQuery}
+              priority={priorityFilter}
+              onPriority={setPriorityFilter}
+              status={statusFilter}
+              onStatus={setStatusFilter}
+              onReset={resetFilters}
+              shown={visibleTasks.length}
+              total={tasks.length}
+            />
+          </>
+        )}
+
+        {showNewTask && id && (
+          <NewTaskForm
+            projectId={id}
+            onCreated={() => {
+              load();
+              toast('Task created');
+            }}
+            onClose={() => setShowNewTask(false)}
+          />
         )}
 
         {!project && !error && (
-          <div className="state">
-            <div className="spinner" />
+          <div className="board" aria-hidden="true">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="skeleton skeleton-col" />
+            ))}
+          </div>
+        )}
+
+        {project && filtering && visibleTasks.length === 0 && (
+          <div className="empty-note">
+            No tasks match your filters.{' '}
+            <button type="button" className="chip" onClick={resetFilters}>
+              Reset
+            </button>
           </div>
         )}
 
         {project && (
-          <div className="board">
-            {COLUMNS.map((col) => {
-              const tasks = project.tasks.filter((t) => t.status === col.status);
-              const lampClass =
-                col.status === 'doing'
-                  ? 'lamp lamp-doing'
-                  : col.status === 'done'
-                    ? `lamp lamp-done${flash === 'done' ? ' lamp-flash' : ''}`
-                    : 'lamp';
-              return (
-                <section
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCorners}
+            onDragStart={onDragStart}
+            onDragMove={onDragMove}
+            onDragEnd={onDragEnd}
+            onDragCancel={onDragCancel}
+          >
+            <div
+              className="board"
+              style={{ '--board-cols': visibleColumns.length } as CSSProperties}
+            >
+              {visibleColumns.map((col) => (
+                <BoardColumn
                   key={col.status}
-                  className="column"
-                  aria-label={`${col.label} column, ${tasks.length} tasks`}
-                >
-                  <header className="column-head">
-                    <span className={lampClass} aria-hidden="true" />
-                    <span className="column-title">{col.label}</span>
-                    <span className="mono column-count">{tasks.length}</span>
-                  </header>
-
-                  <div className="column-body">
-                    {tasks.length === 0 && <p className="muted" style={{ fontSize: 13, padding: 4 }}>Empty</p>}
-                    {tasks.map((task) => (
-                      <article key={task.id} className="task-card">
-                        <button className="task-card-open" onClick={() => openTask(task.id)} type="button">
-                          <span className={`badge badge-${task.priority}`}>{PRIORITY_LABEL[task.priority]}</span>
-                          <span className="task-title">{task.title}</span>
-                        </button>
-                        <div className="task-actions">
-                          {COLUMNS.filter((c) => c.status !== task.status).map((c) => (
-                            <button
-                              key={c.status}
-                              className="btn btn-ghost task-move"
-                              type="button"
-                              title={`Move to ${c.label}`}
-                              onClick={() => moveTask(task, c.status)}
-                            >
-                              → {c.label}
-                            </button>
-                          ))}
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                </section>
-              );
-            })}
-          </div>
+                  status={col.status}
+                  label={col.label}
+                  tasks={visibleTasks.filter((t) => t.status === col.status)}
+                  flash={flash === 'done'}
+                  isDropTarget={overColumn === col.status}
+                  dragging={activeTask !== null}
+                  emptyNote={tasks.length === 0 ? 'No tasks yet' : filtering ? 'No matches' : 'Empty'}
+                  onOpen={(task) => openTask(task.id)}
+                />
+              ))}
+            </div>
+            <DragOverlay>{activeTask ? <TaskCardFace task={activeTask} /> : null}</DragOverlay>
+          </DndContext>
         )}
 
         {project && (
@@ -310,114 +366,19 @@ export default function BoardPage() {
         )}
       </main>
 
-      {/* Task detail drawer */}
-      {openTaskId && (
-        <div className="drawer-backdrop" onClick={closeTask} role="presentation">
-          <aside
-            className="drawer"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Task detail"
-          >
-            <header className="drawer-head">
-              <p className="eyebrow">TASK / DETAIL</p>
-              <button className="btn btn-ghost" type="button" onClick={closeTask}>
-                ✕ Close
-              </button>
-            </header>
-
-            {detailError && <p className="error-text">{detailError}</p>}
-
-            {!detail && !detailError && (
-              <div className="state">
-                <div className="spinner" />
-              </div>
-            )}
-
-            {detail && (
-              <div className="drawer-body">
-                <h2>{detail.title}</h2>
-
-                <div className="task-meta">
-                  <span className={`badge badge-${detail.priority}`}>{PRIORITY_LABEL[detail.priority]}</span>
-                  <span className="badge">{detail.status}</span>
-                  <span className="mono muted" style={{ fontSize: 12 }}>
-                    updated {new Date(detail.updatedAt).toLocaleString()}
-                  </span>
-                </div>
-
-                {detail.description && <p style={{ marginTop: 16 }}>{detail.description}</p>}
-
-                <div className="task-meta" style={{ marginTop: 16 }}>
-                  <span className="eyebrow">MOVE TO</span>
-                  {COLUMNS.filter((c) => c.status !== detail.status).map((c) => (
-                    <button
-                      key={c.status}
-                      className="btn"
-                      type="button"
-                      onClick={async () => {
-                        await moveTask(detail, c.status);
-                        const { task } = await tasksApi.get(detail.id);
-                        setDetail(task);
-                      }}
-                    >
-                      {c.label}
-                    </button>
-                  ))}
-                  {(isOwner || detail.createdById === user?.id) && (
-                    <button className="btn btn-danger" type="button" onClick={() => deleteTask(detail.id)}>
-                      Delete task
-                    </button>
-                  )}
-                </div>
-
-                <hr className="rule" />
-
-                <p className="eyebrow" style={{ marginBottom: 12 }}>
-                  COMMENTS ({detail.comments.length})
-                </p>
-
-                <ul className="comment-list">
-                  {detail.comments.map((c) => (
-                    <li key={c.id}>
-                      <div className="comment-head">
-                        <strong>{c.authorName}</strong>
-                        <span className="mono muted" style={{ fontSize: 11 }}>
-                          {new Date(c.createdAt).toLocaleString()}
-                        </span>
-                        {(c.authorId === user?.id || isOwner) && (
-                          <button className="btn btn-ghost comment-del" type="button" onClick={() => deleteComment(c.id)}>
-                            ✕
-                          </button>
-                        )}
-                      </div>
-                      <p style={{ margin: 0 }}>{c.body}</p>
-                    </li>
-                  ))}
-                  {detail.comments.length === 0 && <li className="muted">No comments yet.</li>}
-                </ul>
-
-                <form onSubmit={addComment} style={{ marginTop: 14 }}>
-                  <label className="field">
-                    <span>Add a comment</span>
-                    <textarea
-                      className="textarea"
-                      maxLength={2000}
-                      required
-                      value={commentBody}
-                      onChange={(e) => setCommentBody(e.target.value)}
-                    />
-                  </label>
-                  <button className="btn btn-primary" type="submit" disabled={commentBusy}>
-                    {commentBusy ? 'Posting…' : 'Post comment'}
-                  </button>
-                </form>
-              </div>
-            )}
-          </aside>
-        </div>
+      {openTaskId && project && (
+        <TaskDrawer
+          key={openTaskId}
+          taskId={openTaskId}
+          isOwner={isOwner}
+          currentUserId={user?.id}
+          onMove={moveTask}
+          onDelete={deleteTask}
+          onClose={closeTask}
+        />
       )}
+
+      {toastStack}
     </div>
   );
 }

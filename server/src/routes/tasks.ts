@@ -27,7 +27,7 @@ const updateTaskSchema = z
     status: statusEnum.optional(),
     priority: priorityEnum.optional(),
     dueDate: z.coerce.date().nullable().optional(),
-    position: z.number().int().min(0).optional(),
+    position: z.number().int().min(0).optional(), // move: index AFTER the move
   })
   .refine((data) => Object.keys(data).length > 0, { message: 'Nothing to update' });
 
@@ -58,12 +58,17 @@ router.post('/projects/:id/tasks', requireAuth, validateBody(createTaskSchema), 
     await requireMembership(projectId, req.user!.id);
     const data = req.body as z.infer<typeof createTaskSchema>;
 
-    const count = await prisma.task.count({ where: { projectId, status: data.status } });
+    // Append after the highest position (a plain count breaks once a column
+    // has gaps left by deletions or moves).
+    const agg = await prisma.task.aggregate({
+      where: { projectId, status: data.status },
+      _max: { position: true },
+    });
     const task = await prisma.task.create({
       data: {
         ...data,
         projectId,
-        position: count,
+        position: (agg._max.position ?? -1) + 1,
         createdById: req.user!.id,
       },
     });
@@ -108,11 +113,67 @@ router.get('/tasks/:id', requireAuth, async (req, res, next) => {
 });
 
 // PATCH /tasks/:id
+// With `position`, the task MOVES: `position` is its index in the target
+// column after the move. The transaction reads both affected columns in
+// display order, removes the task, re-inserts it at `position` and renumbers
+// — so ordering stays correct even when columns have gaps (deletes), and the
+// board sends exactly one request per drop.
 router.patch('/tasks/:id', requireAuth, validateBody(updateTaskSchema), async (req, res, next) => {
   try {
-    await requireTaskAccess(param(req, 'id'), req.user!.id);
+    const current = await requireTaskAccess(param(req, 'id'), req.user!.id);
     const data = req.body as z.infer<typeof updateTaskSchema>;
-    const task = await prisma.task.update({ where: { id: param(req, 'id') }, data });
+    const { position, ...fields } = data;
+
+    if (position === undefined) {
+      const task = await prisma.task.update({ where: { id: current.id }, data: fields });
+      return res.json({ task });
+    }
+
+    const targetStatus = fields.status ?? current.status;
+    const task = await prisma.$transaction(
+      async (tx) => {
+        const readColumn = (status: string) =>
+          tx.task.findMany({
+            where: { projectId: current.projectId, status },
+            orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+            select: { id: true, position: true },
+          });
+
+        const sourceColumn = await readColumn(current.status);
+        const targetColumn = targetStatus === current.status ? sourceColumn : await readColumn(targetStatus);
+
+        // Desired target order: task removed, re-inserted at the requested index.
+        const targetOrder = targetColumn.filter((t) => t.id !== current.id).map((t) => t.id);
+        const at = Math.max(0, Math.min(position, targetOrder.length));
+        targetOrder.splice(at, 0, current.id);
+
+        // Touch only rows that really change: every query is a network round
+        // trip to TiDB, so skipping no-ops keeps the transaction short.
+        const applyOrder = async (order: string[], before: Array<{ id: string; position: number }>) => {
+          const prev = new Map(before.map((t) => [t.id, t.position]));
+          for (const [index, id] of order.entries()) {
+            if (id === current.id) {
+              await tx.task.update({ where: { id }, data: { ...fields, status: targetStatus, position: index } });
+            } else if (prev.get(id) !== index) {
+              await tx.task.update({ where: { id }, data: { position: index } });
+            }
+          }
+        };
+
+        await applyOrder(targetOrder, targetColumn);
+        if (targetStatus !== current.status) {
+          const sourceOrder = sourceColumn.filter((t) => t.id !== current.id).map((t) => t.id);
+          await applyOrder(sourceOrder, sourceColumn);
+        }
+
+        const updated = await tx.task.findUnique({ where: { id: current.id } });
+        if (!updated) throw new AppError('Task not found', 404, 'NOT_FOUND');
+        return updated;
+      },
+      // TiDB Serverless sleeps between calls; waking it up can take longer
+      // than Prisma's default 5s transaction timeout (P2028).
+      { maxWait: 10000, timeout: 30000 },
+    );
     res.json({ task });
   } catch (err) {
     next(err);
